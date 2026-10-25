@@ -116,7 +116,10 @@
     "stages": 5,
     "hidden_channels": 16,
     "coherence_window_size": 7,
-    "gradient_checkpointing": true
+    "gradient_checkpointing": true,
+    "signed_phase_features": true,
+    "router_channels": 8,
+    "initial_probability": 0.5
   },
   "training": {
     "steps": 10000,
@@ -135,9 +138,7 @@
     "complex_weight": 1,
     "amplitude_weight": 0.35,
     "raw_phase_weight": 0.12,
-    "differential_phase_weight": 1.25,
-    "gate_smoothness_weight": 0.0001,
-    "gate_anti_collapse_weight": 0.001
+    "differential_phase_weight": 1.25
   },
   "validation": {
     "snr_db": 20,

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coherent-sar-unfolding"
-version = "1.0.0"
-description = "Phase-preserving bitemporal SAR reconstruction with exchange-equivariant selective deep unfolding"
+version = "2.0.0"
+description = "Bitemporal SAR reconstruction with signed-phase interaction and spatial common/differential phase routing"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

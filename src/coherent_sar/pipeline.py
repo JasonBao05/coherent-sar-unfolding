@@ -10,9 +10,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from .equivariant_selective_model import (
-    FixedMaskExchangeEquivariantSelectiveUnfolding256,
-)
+from .split_phase_utility_model import SplitPhaseUtilityUnfolding256
 from .formal_wideband_operator import (
     MatrixFreeChunkedWidebandSAROperator,
     simulate_wideband_observation,
@@ -113,20 +111,23 @@ def fixed_mask(config: dict[str, Any], device: torch.device) -> torch.Tensor:
 
 def build_model(
     config: dict[str, Any], device: torch.device
-) -> FixedMaskExchangeEquivariantSelectiveUnfolding256:
+) -> SplitPhaseUtilityUnfolding256:
     values = config["model"]
-    return FixedMaskExchangeEquivariantSelectiveUnfolding256(
+    return SplitPhaseUtilityUnfolding256(
         fixed_mask(config, device),
         aperture_count=int(config["sampling"]["aperture_candidates"]),
         stages=int(values["stages"]),
         hidden_channels=int(values["hidden_channels"]),
         coherence_window_size=int(values["coherence_window_size"]),
         gradient_checkpointing=bool(values["gradient_checkpointing"]),
+        signed_phase_features=bool(values["signed_phase_features"]),
+        router_channels=int(values["router_channels"]),
+        initial_probability=float(values["initial_probability"]),
     ).to(device)
 
 
 def observations(
-    model: FixedMaskExchangeEquivariantSelectiveUnfolding256,
+    model: SplitPhaseUtilityUnfolding256,
     operator: MatrixFreeChunkedWidebandSAROperator,
     batch: dict[str, torch.Tensor],
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -199,23 +200,10 @@ def reconstruction_loss(
     return values
 
 
-def add_gate_regularization(
-    loss: torch.Tensor,
-    model: FixedMaskExchangeEquivariantSelectiveUnfolding256,
-    config: dict[str, Any],
-) -> torch.Tensor:
-    values = model.gate_regularization()
-    weights = config["loss"]
-    return (
-        loss
-        + float(weights["gate_smoothness_weight"]) * values["smoothness"]
-        + float(weights["gate_anti_collapse_weight"]) * values["anti_collapse"]
-    )
-
 
 @torch.no_grad()
 def validate_model(
-    model: FixedMaskExchangeEquivariantSelectiveUnfolding256,
+    model: SplitPhaseUtilityUnfolding256,
     operator: MatrixFreeChunkedWidebandSAROperator,
     dataset: SimulatedSARDataset,
     config: dict[str, Any],
@@ -320,7 +308,7 @@ def train(
         measurement1, measurement2 = observations(model, operator, batch)
         estimate1, estimate2 = model(measurement1, measurement2, operator)
         losses = reconstruction_loss(estimate1, estimate2, batch, config)
-        total = add_gate_regularization(losses["total"], model, config)
+        total = losses["total"]
         optimizer.zero_grad(set_to_none=True)
         total.backward()
         torch.nn.utils.clip_grad_norm_(
@@ -352,10 +340,17 @@ def train(
                 best_score = score
                 best_metrics = metrics
                 torch.save(
-                    {"model_state": model.state_dict(), "step": step},
+                    {
+                        "model_type": "split_phase",
+                        "model_state": model.state_dict(),
+                        "step": step,
+                    },
                     output / "best.pt",
                 )
-    torch.save({"model_state": model.state_dict(), "step": total_steps}, output / "last.pt")
+    torch.save(
+        {"model_type": "split_phase", "model_state": model.state_dict(), "step": total_steps},
+        output / "last.pt",
+    )
     write_json(output / "metrics.json", best_metrics)
     return best_metrics
 
@@ -374,6 +369,11 @@ def validate_checkpoint(
     dataset = SimulatedSARDataset(root / config["data_directory"])
     model = build_model(config, device)
     payload = torch.load(Path(checkpoint_path), map_location=device, weights_only=False)
+    if not any(name.startswith("utility_routers.") for name in payload["model_state"]):
+        raise ValueError(
+            "This checkpoint uses the legacy residual-gate model. "
+            "Use the matching v1 code or train a revised split-phase checkpoint."
+        )
     model.load_state_dict(payload["model_state"])
     operator = MatrixFreeChunkedWidebandSAROperator().to(device)
     return validate_model(model, operator, dataset, config, device)

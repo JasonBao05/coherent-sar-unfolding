@@ -1,4 +1,8 @@
-"""Exchange-equivariant dual-epoch unfolding with selective coupling.
+"""Legacy complex-residual gating backbone and shared unfolding components.
+
+The revised default model is SplitPhaseUtilityUnfolding256 in
+split_phase_utility_model.py. The zero-gate fallback described below belongs
+to this legacy class, not to the revised common/differential phase gates.
 
 The architecture in this module enforces the two central DP-JMRNet
 properties by construction:
@@ -160,10 +164,13 @@ class ContinuousSelectiveGate(nn.Module):
 class EquivariantInteraction(nn.Module):
     """One shared endpoint decoder applied in both argument orders."""
 
-    def __init__(self, hidden_channels: int) -> None:
+    def __init__(
+        self, hidden_channels: int, *, signed_phase_features: bool = False
+    ) -> None:
         super().__init__()
+        self.signed_phase_features = bool(signed_phase_features)
         self.symmetric = FeatureBranch(4, hidden_channels)
-        self.endpoint = FeatureBranch(2, hidden_channels)
+        self.endpoint = FeatureBranch(4 if self.signed_phase_features else 2, hidden_channels)
         self.decoder = nn.Sequential(
             nn.Conv2d(3 * hidden_channels, hidden_channels, 3, padding=1),
             nn.SiLU(),
@@ -185,8 +192,17 @@ class EquivariantInteraction(nn.Module):
             dim=1,
         )
         shared = self.symmetric(symmetric_input)
-        endpoint1 = self.endpoint(complex_to_channels(first, channel_dim=1))
-        endpoint2 = self.endpoint(complex_to_channels(second, channel_dim=1))
+        input1 = complex_to_channels(first, channel_dim=1)
+        input2 = complex_to_channels(second, channel_dim=1)
+        if self.signed_phase_features:
+            relation = first.conj() * second
+            relation = relation / (amplitude1 * amplitude2).clamp_min(1.0e-6)
+            cosine = relation.real.clamp(-1.0, 1.0)
+            sine = relation.imag.clamp(-1.0, 1.0)
+            input1 = torch.cat((input1, cosine[:, None], sine[:, None]), dim=1)
+            input2 = torch.cat((input2, cosine[:, None], -sine[:, None]), dim=1)
+        endpoint1 = self.endpoint(input1)
+        endpoint2 = self.endpoint(input2)
         correction1 = self.decoder(torch.cat((shared, endpoint1, endpoint2), dim=1))
         correction2 = self.decoder(torch.cat((shared, endpoint2, endpoint1), dim=1))
         return (
@@ -214,6 +230,7 @@ class FixedMaskExchangeEquivariantSelectiveUnfolding256(nn.Module):
         coherence_window_size: int = 7,
         coherence_eps: float = 1.0e-8,
         gradient_checkpointing: bool = True,
+        signed_phase_features: bool = False,
     ) -> None:
         super().__init__()
         hard_mask = torch.as_tensor(fixed_mask, dtype=torch.float32).reshape(-1)
@@ -227,6 +244,7 @@ class FixedMaskExchangeEquivariantSelectiveUnfolding256(nn.Module):
         self.coherence_window_size = int(coherence_window_size)
         self.coherence_eps = float(coherence_eps)
         self.gradient_checkpointing = bool(gradient_checkpointing)
+        self.signed_phase_features = bool(signed_phase_features)
 
         self.raw_pre_steps = nn.Parameter(torch.full((stages,), -1.05))
         self.raw_post_steps = nn.Parameter(torch.full((stages,), -1.35))
@@ -239,7 +257,10 @@ class FixedMaskExchangeEquivariantSelectiveUnfolding256(nn.Module):
             ComplexStageDenoiser(hidden_channels) for _ in range(stages)
         )
         self.interactions = nn.ModuleList(
-            EquivariantInteraction(hidden_channels) for _ in range(stages)
+            EquivariantInteraction(
+                hidden_channels, signed_phase_features=self.signed_phase_features
+            )
+            for _ in range(stages)
         )
         self.gates = nn.ModuleList(
             ContinuousSelectiveGate(analytical_anchor=(stage == 0))

@@ -7,7 +7,7 @@
 
 Discontinuous aperture sampling leaves gaps in the SAR phase history and makes high-quality reconstruction difficult. In a bitemporal setting, reconstructing the two acquisitions independently can further disturb their shared structure and amplify phase errors, reducing the reliability of the differential phase used for change analysis.
 
-DP-JMRNet addresses this problem by reconstructing both complex SAR images jointly. It combines the SAR observation model with a five-stage deep-unfolding network and selectively exchanges information between the two epochs. The interaction is reduced when the local observations do not provide reliable shared information, which helps preserve epoch-specific content while improving differential-phase reconstruction.
+DP-JMRNet reconstructs both complex SAR images jointly with a five-stage deep-unfolding network. The revised model uses signed relative-phase features and learned spatial gates for the common and differential phase updates. It combines measurement-consistency evidence, local complex correlation, and candidate changes to decide how much of each phase update to retain, while preserving the joint candidate amplitudes.
 
 This repository provides the reconstruction model, a matrix-free wideband SAR operator, training and validation scripts, numerical tests, a small example dataset, and the code required to reproduce the complete simulated dataset.
 
@@ -15,15 +15,24 @@ This repository provides the reconstruction model, a matrix-free wideband SAR op
 
 The model takes two incomplete complex phase histories acquired at different epochs and reconstructs the corresponding complex SAR images together. The known SAR acquisition geometry and aperture sampling pattern are used directly in the reconstruction rather than being approximated by a generic image-degradation model.
 
-Each of the five unfolding stages contains three main components:
+Each of the five unfolding stages performs four steps:
 
-1. matrix-free data consistency based on the SAR forward and adjoint operators;
-2. a shared complex-valued image prior for the two epochs;
-3. coherence- and residual-aware selective interaction between the reconstructions.
+1. apply pre-DC and the shared real/imaginary residual prior;
+2. construct exchange-equivariant interaction corrections from signed relative-phase features;
+3. apply the same post-DC step to a base candidate and an interaction-aware joint candidate for each epoch;
+4. split the candidate phase increments into common and differential components, then route them with two learned spatial gates.
 
-Data consistency is applied both before the shared prior and after the selective interaction. The shared prior captures structures common to both acquisitions, while the interaction module determines where cross-epoch information is reliable enough to use. In regions with weak coherence or conflicting measurement evidence, the two reconstruction branches operate more independently to avoid transferring misleading information.
+Each stage has a 12-channel observation-state input and a small 12→8→2 convolutional router. The features include fixed initial and current coherence, normalized DC-gradient evidence, candidate changes, amplitude discrepancies, and the common/differential phase-increment magnitudes. The router inputs are detached, while its parameters are learned jointly with the backbone. Both gates start at 0.5 in the supplied configurations.
 
-The network outputs two complex SAR images. Training considers complex reconstruction quality, amplitude fidelity, individual phase accuracy, and the differential phase between the two epochs. Exchanging the input epochs exchanges the corresponding outputs, so the result does not depend on an arbitrary ordering of the image pair.
+A gate value of one retains the corresponding joint phase increment; zero restores the corresponding base phase component. The joint amplitudes are retained at both endpoints. Consequently, setting both phase gates to zero is different from selecting the fully independent reconstruction branch.
+
+After the five stages, the same phase-only refiner is applied to both epochs. Training uses the final complex, amplitude, individual circular-phase, and differential circular-phase losses. There is no auxiliary utility loss or gate smoothness/anti-collapse penalty in the revised training objective. The tests check epoch exchange numerically, including swaps of the observations and masks.
+
+![One unfolding stage of revised DP-JMRNet](assets/architecture.svg)
+
+See [architecture and routing features](docs/architecture.md) for module details and the meaning of all 12 router inputs.
+
+The default public model is <code>SplitPhaseUtilityUnfolding256</code>. The previous <code>FixedMaskExchangeEquivariantSelectiveUnfolding256</code> remains available for legacy comparisons. Version 1 checkpoints use different endpoint inputs and gates and cannot be loaded directly into the revised model; use the matching legacy code or train a revised checkpoint.
 
 ## Repository structure
 
@@ -34,7 +43,9 @@ The network outputs two complex SAR images. Training considers complex reconstru
 ├── scripts/generate_dataset.py     complete dataset generator
 ├── scripts/train.py                training entry point
 ├── scripts/validate.py             checkpoint evaluation entry point
-├── src/coherent_sar/               model, SAR operator, and data pipeline
+├── src/coherent_sar/               revised/legacy models, SAR operator, and pipeline
+├── docs/architecture.md            phase-routing mechanism and feature definitions
+├── assets/                        revised architecture diagrams
 ├── tests/                          numerical and architectural tests
 ├── config.json                     quick example configuration
 └── config.full.json                complete-dataset training configuration
@@ -134,7 +145,7 @@ The validation script reports weighted differential-phase RMSE, amplitude NMSE, 
 - Train, validation, and test splits are separated at the parent-scene level.
 - Manifests record the generation metadata and numerical truth hashes of every sample.
 - Noise seeds are deterministic and stored independently for each split and epoch.
-- The tests cover the complex adjoint relation, operator gradients, exchange equivariance, selective fallback, and model backpropagation.
+- The tests cover the complex adjoint relation, operator gradients, signed-feature exchange equivariance, phase-gate endpoints, amplitude preservation, detached evidence, router gradients, and the training/checkpoint pipeline.
 
 ## Scope
 
